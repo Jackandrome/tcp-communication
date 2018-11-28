@@ -1,0 +1,132 @@
+#-*-coding:utf-8-*-
+import sys
+import struct  # 将字符串打包为二进制流进行网络传输
+import select  #
+import signal  # 用于捕获中断信号
+import cPickle  # 将python对象进行序列化:dumps将python对象序列化保存为字符串,loads与之相反
+from socket import *
+
+HOST = '::1'
+
+def get_key(dict, value):
+    return [k for k, v in dict.items() if v == value]
+
+def send(channel, *args):  # 发送数据
+    buffer = cPickle.dumps(args)
+    value = htonl(len(buffer))
+    size = struct.pack("L", value)
+    channel.send(size)
+    channel.send(buffer)
+
+
+def receive(channel):  # 接收数据
+    size = struct.calcsize("L")
+    size = channel.recv(size)
+    try:
+        size = ntohl(struct.unpack("L", size)[0])  #
+    except struct.error, e:
+        return ''
+    buf = ''
+    while len(buf) < size:
+        buf += channel.recv(size - len(buf))
+    return cPickle.loads(buf)[0]  # 恢复python对象
+
+
+class ChatServer(object):
+    def __init__(self, PORT, backlog=5):
+        self.clients = 0
+        self.clientmap = {}
+        self.outputs = []  # Client会话列表
+        self.server = socket(AF_INET6, SOCK_STREAM)
+        self.server.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)  # 重用套接字地址
+        self.server.bind((HOST, PORT))
+        self.server.listen(backlog)
+        signal.signal(signal.SIGINT,
+                      self.signalhandler)  # 使用signal模块捕获中断操作 SIGINT中断进程(ctrl+c)， SIGTERM 终止进程，SIGKILL杀死进程，SIGALRM 闹钟信号
+
+    def signalhandler(self, signum, frame):  # 中断处理方法
+        print("Shutting down server ...")
+        for output in self.outputs:
+            output.close()
+        self.server.close()
+
+    def get_client_name(self, client):
+        info = self.clientmap[client]
+        host, port, name = info[0][0], info[0][1], info[1]
+        return ':'.join((('@'.join((name, host))), str(port)))
+
+    def run(self):
+        inputs = [self.server]
+        print('Waiting for connect...')
+        while True:
+            try:
+                readable, writeable, execption = select.select(inputs, self.outputs, [])
+            except select.error, e:
+                break
+            for sock in readable:
+                if sock == self.server:  # 服务器端接收
+                    client, address = self.server.accept()
+                    print("Chat server: connected from", address)
+                    self.clients += 1
+                    cname = receive(client)
+                    send(client, str(address[0]))
+                    inputs.append(client)
+                    self.clientmap[client] = (address, cname)
+                    msg = "(Connected : New Client(%d) from %s)\n" % (self.clients, self.get_client_name(client))
+                    message = "At present, only one of you is in the chat room!"
+                    if self.clients == 1:
+                        send(client, message)
+                    for output in self.outputs:
+                        send(output, msg)
+                    self.outputs.append(client)  # 将开始回话的client加入Client回话列表
+
+                # elif sock == sys.stdin:
+                # break
+                else:
+                    try:
+                        data = receive(sock)
+
+                        if data == 'end':
+                            inf = '[' + self.get_client_name(sock) + ']  is logging out'
+                            for output in self.outputs:
+                                if output != sock:
+                                    send(output, inf)
+
+                        elif  data:
+                            if '@'  not in data:
+                                msg = '[' + self.get_client_name(sock) + '] >> ' + data
+                                for output in self.outputs:
+                                    if output != sock:
+                                        send(output, msg)
+                            else:
+                                mess = '[' + self.get_client_name(sock) + '] mentioned you'
+                                msg = '[' + self.get_client_name(sock) + '] >> ' + data
+                                name = list(self.clientmap.values())
+                                for cl  in name:
+                                    for client in cl[1]:
+                                        if client == data[1]:
+                                            c = list(self.clientmap.keys())[list(self.clientmap.values()).index(cl)]
+                                            send(c, mess)
+                                for output in self.outputs:
+                                    if output != sock:
+                                        send(output, msg)
+                        else:
+                            self.clients -= 1
+                            sock.close()
+                            inputs.remove(sock)
+                            self.outputs.remove(sock)
+                            msg = '(Now hung up: Client from %s)' % self.get_client_name(sock)
+                            message = "At present, only one of you is in the chat room!"
+                            for output in self.outputs:
+                                send(output, msg)
+                            if self.clients == 1:
+                                send(self.outputs[0], message)
+                    except error, e:
+                        inputs.remove(sock)
+                        self.outputs.remove(sock)
+        self.server.close()
+
+
+if __name__ == "__main__":
+    server = ChatServer(39200)
+    server.run()
